@@ -1,22 +1,29 @@
-/// server
-///
-/// Purpose:
-///
-/// Description:
-///
-/// History:
-///    17/02/2017, Created by jumperchen
-///
-/// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
+// server
+//
+// Purpose:
+//
+// Description:
+//
+// History:
+//    17/02/2017, Created by jumperchen
+//
+// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
+import 'dart:async' show unawaited;
 import 'dart:convert';
 import 'dart:io' hide Socket;
+
 import 'package:logging/logging.dart';
-import 'package:socket_io/src/engine/connect.dart';
-import 'package:socket_io/src/engine/engine.dart';
-import 'package:socket_io/src/engine/socket.dart';
-import 'package:socket_io/src/engine/transport/transports.dart';
 import 'package:stream/stream.dart';
 import 'package:uuid/uuid.dart';
+
+import '../models/server_options_models.dart';
+import '../value_objects/timeout_duration_vo.dart';
+import '../value_objects/transport_name_vo.dart';
+import '../value_objects/url_path_vo.dart';
+import 'connect.dart';
+import 'engine.dart';
+import 'socket.dart';
+import 'transport/transports.dart';
 
 /// Server constructor.
 ///
@@ -30,7 +37,7 @@ class ServerErrors {
   static const int FORBIDDEN = 4;
 }
 
-const Map<int, String> ServerErrorMessages = {
+const Map<int, String> ServerErrorMessages = <int, String>{
   0: 'Transport unknown',
   1: 'Session ID unknown',
   2: 'Bad handshake method',
@@ -40,58 +47,44 @@ const Map<int, String> ServerErrorMessages = {
 
 class Server extends Engine {
   static final Logger _logger = Logger('socket_io:engine.Server');
-  Map clients = {};
+  Map<String, Socket> clients = <String, Socket>{};
   int clientsCount = 0;
-  late int pingTimeout;
-  late int pingInterval;
-  late int upgradeTimeout;
+  late TimeoutDuration pingTimeout;
+  late TimeoutDuration pingInterval;
+  late TimeoutDuration upgradeTimeout;
   late double maxHttpBufferSize;
-  List<String> transports = ['polling', 'websocket'];
+  late List<TransportName> transports;
   late bool allowUpgrades;
-  Function? allowRequest;
-  late dynamic cookie;
-  late dynamic cookiePath;
+  AllowRequestCallback? allowRequest;
+  late CookieConfig cookie;
+  late CookiePathConfig cookiePath;
   late bool cookieHttpOnly;
-  late Map perMessageDeflate;
-  late Map httpCompression;
-  dynamic initialPacket;
-  final Uuid _uuid = Uuid();
+  late PerMessageDeflateConfig perMessageDeflate;
+  late HttpCompressionConfig httpCompression;
+  Object? initialPacket;
+  late UrlPath path;
+  final Uuid _uuid = const Uuid();
 
-  Server([Map? opts]) {
-    opts = opts ?? {};
-
-    pingTimeout = opts['pingTimeout'] ?? 60000;
-    pingInterval = opts['pingInterval'] ?? 25000;
-    upgradeTimeout = opts['upgradeTimeout'] ?? 10000;
-    maxHttpBufferSize = opts['maxHttpBufferSize'] ?? 10E7;
-    allowUpgrades = false != opts['allowUpgrades'];
-    allowRequest = opts['allowRequest'];
-    cookie = opts['cookie'] == false
-        ? false
-        : opts['cookie'] ??
-            'io'; //false != opts.cookie ? (opts.cookie || 'io') : false;
-    cookiePath = opts['cookiePath'] == false
-        ? false
-        : opts['cookiePath'] ??
-            '/'; //false != opts.cookiePath ? (opts.cookiePath || '/') : false;
-    cookieHttpOnly = opts['cookieHttpOnly'] != false;
-
-    if (!opts.containsKey('perMessageDeflate') ||
-        opts['perMessageDeflate'] == true) {
-      perMessageDeflate =
-          opts['perMessageDeflate'] is Map ? opts['perMessageDeflate'] : {};
-      if (!perMessageDeflate.containsKey('threshold')) {
-        perMessageDeflate['threshold'] = 1024;
-      }
-    }
-    httpCompression = opts['httpCompression'] ?? {};
-    if (!httpCompression.containsKey('threshold')) {
-      httpCompression['threshold'] = 1024;
-    }
-
-    initialPacket = opts['initialPacket'];
+  Server(final ServerOptionsModel options) {
+    pingTimeout = options.pingTimeout;
+    pingInterval = options.pingInterval;
+    upgradeTimeout = options.upgradeTimeout;
+    maxHttpBufferSize = options.maxHttpBufferSize;
+    transports = List<TransportName>.from(options.transports);
+    allowUpgrades = options.allowUpgrades;
+    allowRequest = options.allowRequest;
+    cookie = options.cookie;
+    cookiePath = options.cookiePath;
+    cookieHttpOnly = options.cookieHttpOnly;
+    perMessageDeflate = options.perMessageDeflate;
+    httpCompression = options.httpCompression;
+    initialPacket = options.initialPacket;
+    path = options.path;
     _init();
   }
+
+  /// Create from Map (legacy support)
+  factory Server.fromMap(final Map<String, dynamic>? opts) => Server(ServerOptionsModel.fromMap(opts));
 
   /// Initialize websocket server
   ///
@@ -123,8 +116,8 @@ class Server extends Engine {
   /// @return {Array}
   /// @api public
 
-  List<String> upgrades(String transport) {
-    if (!allowUpgrades) return List.empty();
+  List<String> upgrades(final String transport) {
+    if (!allowUpgrades) return List<String>.empty();
     return Transports.upgradesTo(transport);
   }
 
@@ -133,33 +126,40 @@ class Server extends Engine {
   /// @param {http.IncomingMessage}
   /// @return {Boolean} whether the request is valid
   /// @api private
-
-  void verify(SocketConnect connect, bool upgrade, fn) {
+  void verify(final SocketConnect connect, final bool upgrade, final void Function(Object?, bool) fn) {
     // transport check
-    var req = connect.request;
-    var transport = req.uri.queryParameters['transport'];
-    if (!transports.contains(transport)) {
+    final HttpRequest req = connect.request;
+    final String? transport = req.uri.queryParameters['transport'];
+    final bool transportSupported =
+        transport != null && transports.any((final TransportName t) => t.value == transport);
+    if (!transportSupported) {
       _logger.fine('unknown transport "$transport"');
       return fn(ServerErrors.UNKNOWN_TRANSPORT, false);
     }
 
     // sid check
-    var sid = req.uri.queryParameters['sid'];
+    final String? sid = req.uri.queryParameters['sid'];
     if (sid != null) {
       if (!clients.containsKey(sid)) {
         return fn(ServerErrors.UNKNOWN_SID, false);
       }
-      if (!upgrade && clients[sid].transport.name != transport) {
+      final Socket? client = clients[sid];
+      if (!upgrade && client != null && client.transport.name != transport) {
         _logger.fine('bad request: unexpected transport without upgrade');
         return fn(ServerErrors.BAD_REQUEST, false);
       }
     } else {
+      if ('OPTIONS' == req.method) {
+        return fn(null, true);
+      }
+
       // handshake is GET only
       if ('GET' != req.method) {
         return fn(ServerErrors.BAD_HANDSHAKE_METHOD, false);
       }
       if (allowRequest == null) return fn(null, true);
-      return allowRequest!(req, fn);
+      allowRequest!(req, fn);
+      return;
     }
 
     fn(null, true);
@@ -168,14 +168,11 @@ class Server extends Engine {
   /// Closes all clients.
   ///
   /// @api public
-
   @override
   void close() {
     _logger.fine('closing all open clients');
-    for (var key in clients.keys.toList(growable: false)) {
-      if (clients[key] != null) {
-        clients[key].close(true);
-      }
+    for (final String key in clients.keys.toList(growable: false)) {
+      clients[key]?.close(true);
     }
 //  if (this.ws) {
 //    _logger.fine('closing webSocketServer');
@@ -189,24 +186,22 @@ class Server extends Engine {
   /// @param {http.IncomingMessage} request
   /// @param {http.ServerResponse|http.OutgoingMessage} response
   /// @api public
-
-  void handleRequest(SocketConnect connect) {
-    var req = connect.request;
+  void handleRequest(final SocketConnect connect) {
+    final HttpRequest req = connect.request;
     _logger.fine('handling ${req.method} http request ${req.uri.path}');
-//  this.prepare(req);
-//  req.res = res;
 
-    var self = this;
-    verify(connect, false, (err, success) {
+    final Server self = this;
+    verify(connect, false, (final Object? err, final bool success) {
       if (!success) {
         sendErrorMessage(req, err);
         return;
       }
-//print('sid ${req.uri.queryParameters['sid']}');
-      if (req.uri.queryParameters['sid'] != null) {
+
+      final String? sid = req.uri.queryParameters['sid'];
+      if (sid != null) {
         _logger.fine('setting new request for existing client');
-        self.clients[req.uri.queryParameters['sid']].transport
-            .onRequest(connect);
+        final Socket? client = self.clients[sid];
+        client?.transport.onRequest(connect);
       } else {
         self.handshake(req.uri.queryParameters['transport'] as String, connect);
       }
@@ -218,29 +213,30 @@ class Server extends Engine {
   /// @param {http.ServerResponse} response
   /// @param {code} error code
   /// @api private
-
-  static void sendErrorMessage(HttpRequest req, code) {
-    var res = req.response;
-    var isForbidden = !ServerErrorMessages.containsKey(code);
+  static void sendErrorMessage(final HttpRequest req, final Object? code) {
+    final HttpResponse res = req.response;
+    final bool isForbidden = !ServerErrorMessages.containsKey(code);
     if (isForbidden) {
-      res.statusCode = HttpStatus.forbidden;
-      res.headers.contentType = ContentType.json;
-      res.write(json.encode({
-        'code': ServerErrors.FORBIDDEN,
-        'message': code ?? ServerErrorMessages[ServerErrors.FORBIDDEN]
-      }));
+      res
+        ..statusCode = HttpStatus.forbidden
+        ..headers.contentType = ContentType.json
+        ..write(json.encode(<String, dynamic>{
+          'code': ServerErrors.FORBIDDEN,
+          'message': code ?? ServerErrorMessages[ServerErrors.FORBIDDEN]
+        }));
+      unawaited(res.close());
       return;
     }
     if (req.headers.value('origin') != null) {
       res.headers.add('Access-Control-Allow-Credentials', 'true');
-      res.headers
-          .add('Access-Control-Allow-Origin', req.headers.value('origin')!);
+      res.headers.add('Access-Control-Allow-Origin', req.headers.value('origin')!);
     } else {
       res.headers.add('Access-Control-Allow-Origin', '*');
     }
-    res.statusCode = HttpStatus.badRequest;
-    res.write(
-        json.encode({'code': code, 'message': ServerErrorMessages[code]}));
+    res
+      ..statusCode = HttpStatus.badRequest
+      ..write(json.encode(<String, dynamic>{'code': code, 'message': ServerErrorMessages[code]}));
+    unawaited(res.close());
   }
 
   /// generate a socket id.
@@ -248,28 +244,27 @@ class Server extends Engine {
   ///
   /// @param {Object} request object
   /// @api public
-  String generateId(SocketConnect connect) {
-    return _uuid.v1().replaceAll('-', '');
-  }
+  String generateId(final SocketConnect connect) => _uuid.v1().replaceAll('-', '');
 
   /// Handshakes a new client.
   ///
   /// @param {String} transport name
   /// @param {Object} request object
   /// @api private
-  void handshake(String transportName, SocketConnect connect) {
-    var id = generateId(connect);
+  void handshake(final String transportName, final SocketConnect connect) {
+    final String id = generateId(connect);
 
     _logger.fine('handshaking client $id');
-    var transport;
-    var req = connect.request;
+    late Transport transport;
+    final HttpRequest req = connect.request;
     try {
       transport = Transports.newInstance(transportName, connect);
       if ('polling' == transportName) {
-        transport.maxHttpBufferSize = maxHttpBufferSize;
-        transport.httpCompression = httpCompression;
+        transport
+          ..maxHttpBufferSize = maxHttpBufferSize
+          ..httpCompression = httpCompression.toMap();
       } else if ('websocket' == transportName) {
-        transport.perMessageDeflate = perMessageDeflate;
+        transport.perMessageDeflate = perMessageDeflate.toMap();
       }
 
       if (req.uri.hasQuery && req.uri.queryParameters.containsKey('b64')) {
@@ -281,15 +276,18 @@ class Server extends Engine {
       sendErrorMessage(req, ServerErrors.BAD_REQUEST);
       return;
     }
-    var socket = Socket(id, this, transport, connect);
+    final Socket socket = Socket(id, this, transport, connect);
 
-    if (cookie?.isNotEmpty == true) {
-      transport.on('headers', (headers) {
-        headers['Set-Cookie'] = '$cookie=${Uri.encodeComponent(id)}' +
-            (cookiePath?.isNotEmpty == true ? '; Path=$cookiePath' : '') +
-            (cookiePath?.isNotEmpty == true && cookieHttpOnly == true
-                ? '; HttpOnly'
-                : '');
+    if (cookie.isEnabled && cookie.name != null) {
+      transport.on('headers', (final dynamic headers) {
+        final StringBuffer cookieValue = StringBuffer('${cookie.name}=${Uri.encodeComponent(id)}');
+        if (cookiePath.isEnabled && cookiePath.path != null) {
+          cookieValue.write('; Path=${cookiePath.path}');
+          if (cookieHttpOnly) {
+            cookieValue.write('; HttpOnly');
+          }
+        }
+        headers['Set-Cookie'] = cookieValue.toString();
       });
     }
 
@@ -298,7 +296,7 @@ class Server extends Engine {
     clients[id] = socket;
     clientsCount++;
 
-    socket.once('close', (_) {
+    socket.once('close', (final _) {
       clients.remove(id);
       clientsCount--;
     });
@@ -309,23 +307,13 @@ class Server extends Engine {
   /// Handles an Engine.IO HTTP Upgrade.
   ///
   /// @api public
-  void handleUpgrade(SocketConnect connect) {
-//  this.prepare(req);
-
-    verify(connect, true, (err, success) {
+  void handleUpgrade(final SocketConnect connect) {
+    verify(connect, true, (final Object? err, final bool success) async {
       if (!success) {
-        abortConnection(connect, err);
+        await abortConnection(connect, err);
         return;
       }
-
-//  var head = new Buffer(upgradeHead.length);
-//  upgradeHead.copy(head);
-//  upgradeHead = null;
-
-      // delegate to ws
-//  self.ws.handleUpgrade(req, socket, head, function (conn) {
-      onWebSocket(connect);
-//  });
+      await onWebSocket(connect);
     });
   }
 
@@ -333,86 +321,75 @@ class Server extends Engine {
   ///
   /// @param {ws.Socket} websocket
   /// @api private
-
-  void onWebSocket(SocketConnect connect) {
-//    socket.listen((_) {},
-//        onError: () => _logger.fine('websocket error before upgrade'));
-
-//  if (!transports[req._query.transport].handlesUpgrades) {
-//    _logger.fine('transport doesnt handle upgraded requests');
-//    socket.close();
-//    return;
-//  }
+  Future<void> onWebSocket(final SocketConnect connect) async {
     if (connect.request.connectionInfo == null) {
       _logger.fine('WebSocket connection closed: ${connect.request.uri.path}');
       return;
     }
     // get client id
-    var id = connect.request.uri.queryParameters['sid'];
-
-    // keep a reference to the ws.Socket
-//  req.websocket = socket;
+    final String? id = connect.request.uri.queryParameters['sid'];
 
     if (id != null) {
-      var client = clients[id];
+      final Socket? client = clients[id];
       if (client == null) {
         _logger.fine('upgrade attempt for closed client');
-        connect.websocket?.close();
+        await connect.websocket?.close();
       } else if (client.upgrading == true) {
         _logger.fine('transport has already been trying to upgrade');
-        connect.websocket?.close();
+        if (connect.websocket != null) {
+          await connect.websocket!.close();
+        }
       } else if (client.upgraded == true) {
         _logger.fine('transport had already been upgraded');
-        connect.websocket?.close();
+        if (connect.websocket != null) {
+          await connect.websocket!.close();
+        }
       } else {
         _logger.fine('upgrading existing transport');
-        var req = connect.request;
-        var transport = Transports.newInstance(
-            req.uri.queryParameters['transport'] as String, connect);
-        // ignore: unrelated_type_equality_checks
-        if (req.uri.queryParameters['b64'] == true) {
+        final HttpRequest req = connect.request;
+        final Transport transport = Transports.newInstance(req.uri.queryParameters['transport'] as String, connect);
+        final String? b64 = req.uri.queryParameters['b64'];
+        if (b64 == '1' || b64 == 'true') {
           transport.supportsBinary = false;
         } else {
           transport.supportsBinary = true;
         }
-        transport.perMessageDeflate = perMessageDeflate;
+        transport.perMessageDeflate = perMessageDeflate.toMap();
         client.maybeUpgrade(transport);
       }
     } else {
-      handshake(
-          connect.request.uri.queryParameters['transport'] as String, connect);
+      handshake(connect.request.uri.queryParameters['transport'] as String, connect);
     }
   }
 
   /// Captures upgrade requests for a http.Server.
   ///
   /// @param {http.Server} server
-  /// @param {Object} options
+  /// @param {AttachmentOptionsModel} options
   /// @api public
-  void attachTo(StreamServer server, Map? options) {
-    options = options ?? {};
-    var path =
-        (options['path'] ?? '/engine.io').replaceFirst(RegExp(r'\/$'), '');
+  void attachTo(final StreamServer server, final Map<String, dynamic>? options) {
+    final AttachmentOptionsModel attachOptions = AttachmentOptionsModel.fromMap(options);
+    String path = attachOptions.path.value.replaceFirst(RegExp(r'/$'), '');
 
     // normalize path
     path += '/';
 
     // cache and clean up listeners
-    server.map('$path.*', (HttpConnect connect) async {
-      var req = connect.request;
+    server.map('$path.*', (final HttpConnect connect) async {
+      final HttpRequest req = connect.request;
 
       _logger.fine('intercepting request for path "$path"');
       if (WebSocketTransformer.isUpgradeRequest(req) &&
-          transports.contains('websocket')) {
+          transports.any((final TransportName t) => t == TransportName.websocket)) {
 //          print('init websocket... ${req.uri}');
-        var socket = await WebSocketTransformer.upgrade(req);
-        var socketConnect = SocketConnect.fromWebSocket(connect, socket);
-        socketConnect.dataset['options'] = options;
+        final WebSocket socket = await WebSocketTransformer.upgrade(req);
+        final SocketConnect socketConnect = SocketConnect.fromWebSocket(connect, socket);
+        socketConnect.dataset['options'] = attachOptions.toMap();
         handleUpgrade(socketConnect);
         return socketConnect.done;
       } else {
-        var socketConnect = SocketConnect(connect);
-        socketConnect.dataset['options'] = options;
+        final SocketConnect socketConnect = SocketConnect(connect);
+        socketConnect.dataset['options'] = attachOptions.toMap();
         handleRequest(socketConnect);
         return socketConnect.done;
       }
@@ -424,21 +401,16 @@ class Server extends Engine {
   /// @param {net.Socket} socket
   /// @param {code} error code
   /// @api private
-
-  static void abortConnection(SocketConnect connect, code) {
-    var socket = connect.websocket;
+  static Future<void> abortConnection(final SocketConnect connect, final Object? code) async {
+    final WebSocket? socket = connect.websocket;
     if (socket?.readyState == HttpStatus.ok) {
-      var message = ServerErrorMessages.containsKey(code)
-          ? ServerErrorMessages[code]
-          : code;
-      var length = utf8.encode(message).length;
-      socket!.add('HTTP/1.1 400 Bad Request\r\n'
-              'Connection: close\r\n'
-              'Content-type: text/html\r\n'
-              'Content-Length: $length\r\n'
-              '\r\n' +
-          message);
+      final String message = ServerErrorMessages.containsKey(code) ? ServerErrorMessages[code]! : code.toString();
+      final int length = utf8.encode(message).length;
+      socket!.add(
+          'HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-type: text/html\r\nContent-Length: $length\r\n\r\n$message');
     }
-    socket?.close();
+    if (socket != null) {
+      await socket.close();
+    }
   }
 }

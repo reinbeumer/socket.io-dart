@@ -1,12 +1,95 @@
-# This file allows you to configure the Dart analyzer.
-#
-# The commented part below is just for inspiration. Read the guide here:
-#   https://www.dartlang.org/guides/language/analysis-options
-include: package:pedantic/analysis_options.yaml
+#include: package:lint/strict.yaml
+include: package:lints/recommended.yaml
+
+linter:
+  rules:
+    always_declare_return_types: true
+    always_specify_types: true
+
+    # https://www.reddit.com/r/FlutterDev/comments/1pggt66/a_lint_package_that_prevents_subtle_singleton/
+    always_use_package_imports: false
+    prefer_relative_imports: true
+
+    avoid_bool_literals_in_conditional_expressions: false
+    avoid_classes_with_only_static_members: false
+    avoid_final_parameters: false
+    avoid_function_literals_in_foreach_calls: false
+    avoid_implementing_value_types: false
+    avoid_print: true
+    camel_case_types: false
+    cascade_invocations: true
+    combinators_ordering: true
+    constant_identifier_names: false
+    curly_braces_in_flow_control_structures: true
+    directives_ordering: true
+    discarded_futures: true
+    join_return_with_assignment: false
+    library_private_types_in_public_api: false
+    missing_whitespace_between_adjacent_strings: false
+    no_adjacent_strings_in_list: false
+    non_constant_identifier_names: false
+    prefer_expression_function_bodies: true
+    prefer_final_in_for_each: true
+    prefer_final_locals: true
+    #    prefer_final_parameters: true
+    parameter_assignments: true
+    prefer_foreach: true
+    prefer_if_elements_to_conditional_expressions: true
+    prefer_single_quotes: true
+    prefer_void_to_null: false
+    switch_on_type: true
+    type_literal_in_constant_pattern: true
+    unawaited_futures: true
+    unintended_html_in_doc_comment: false
+    unnecessary_await_in_return: true
+    unnecessary_breaks: false
+    unnecessary_lambdas: true
+    unnecessary_raw_strings: true
+    unnecessary_unawaited: true
+    use_null_aware_elements: true
+    use_setters_to_change_properties: false
+    use_string_in_part_of_directives: false
+
+    # consistency (from `dart_flutter_team_lints`)
+    lines_longer_than_80_chars: false
+    omit_local_variable_types: false
+    prefer_asserts_in_initializer_lists: false
+    prefer_const_constructors: true
+    sort_pub_dependencies: false
+    unnecessary_library_directive: false
+    unnecessary_library_name: false
+    unnecessary_parenthesis: false
+    unnecessary_statements: true
+    use_is_even_rather_than_modulo: true
+
+    # correctness (from `dart_flutter_team_lints`)
+    avoid_catching_errors: false
+    avoid_dynamic_calls: false
+    comment_references: false
+    conditional_uri_does_not_exist: true
+    only_throw_errors: true
+    test_types_in_equals: true
+    throw_in_finally: true
+    type_annotate_public_apis: true
+    unreachable_from_main: false
+
 analyzer:
-#   exclude:
-#     - path/to/excluded/files/**
-# linter:
-#   rules:
-#     # see catalog here: http://dart-lang.github.io/linter/lints/
-#     - hash_and_equals
+  plugins:
+    - dart_code_linter
+  language:
+    strict-casts: false
+    strict-inference: true
+    strict-raw-types: true
+  exclude:
+    - "**/*.g.dart"
+    - build/**
+    - "test/**"
+    - "example/**"
+    - "test*.dart"
+    - "**/test_*.dart"
+
+formatter:
+  page_width: 120
+  trailing_commas: preserve
+
+

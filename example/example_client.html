@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Socket.IO Browser Example</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 24px; max-width: 900px; }
+    .row { display: flex; gap: 8px; margin-bottom: 8px; flex-wrap: wrap; }
+    input, button { padding: 8px; font-size: 14px; }
+    input { min-width: 180px; }
+    #log { background: #111; color: #0f0; padding: 12px; min-height: 260px; overflow: auto; white-space: pre-wrap; }
+    .muted { color: #666; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <h1>Socket.IO Browser Client</h1>
+  <p class="muted">Defaults match <code>example/example_server.dart</code> (host <code>127.0.0.1</code>, port <code>3005</code>, path <code>/socket.io</code>).</p>
+
+  <div class="row">
+    <input id="host" value="127.0.0.1" placeholder="Host" />
+    <input id="port" value="3005" placeholder="Port" />
+    <input id="path" value="/socket.io" placeholder="Path" />
+    <input id="transports" value="polling,websocket" placeholder="Transports" />
+  </div>
+
+  <div class="row">
+    <button id="connectBtn">Connect</button>
+    <button id="disconnectBtn" disabled>Disconnect</button>
+  </div>
+
+  <div class="row">
+    <input id="messageInput" value="Hello from browser client!" placeholder="Message" style="flex: 1" />
+    <button id="sendMessageBtn" disabled>Send `message`</button>
+    <button id="sendMsgBtn" disabled>Send `msg`</button>
+  </div>
+
+  <pre id="log"></pre>
+
+  <script src="https://cdn.socket.io/4.8.1/socket.io.min.js"></script>
+  <script>
+    let socket = null;
+
+    const logEl = document.getElementById('log');
+    const hostEl = document.getElementById('host');
+    const portEl = document.getElementById('port');
+    const pathEl = document.getElementById('path');
+    const transportsEl = document.getElementById('transports');
+    const messageEl = document.getElementById('messageInput');
+    const connectBtn = document.getElementById('connectBtn');
+    const disconnectBtn = document.getElementById('disconnectBtn');
+    const sendMessageBtn = document.getElementById('sendMessageBtn');
+    const sendMsgBtn = document.getElementById('sendMsgBtn');
+
+    function log(message) {
+      const ts = new Date().toISOString();
+      logEl.textContent += `[${ts}] ${message}\n`;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setConnectedUi(connected) {
+      connectBtn.disabled = connected;
+      disconnectBtn.disabled = !connected;
+      sendMessageBtn.disabled = !connected;
+      sendMsgBtn.disabled = !connected;
+    }
+
+    connectBtn.addEventListener('click', () => {
+      if (socket) {
+        socket.disconnect();
+      }
+
+      const host = hostEl.value.trim();
+      const port = portEl.value.trim();
+      const path = pathEl.value.trim();
+      const transports = transportsEl.value
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      const baseUrl = `http://${host}:${port}`;
+      log(`Connecting to ${baseUrl}${path} (transports: ${transports.join(', ')})`);
+
+      socket = io(baseUrl, {
+        path,
+        transports,
+        forceNew: true,
+        reconnection: false,
+        timeout: 5000,
+      });
+
+      socket.on('connect', () => {
+        setConnectedUi(true);
+        log(`CONNECTED id=${socket.id} transport=${socket.io.engine.transport.name}`);
+      });
+
+      socket.on('connect_error', (error) => {
+        setConnectedUi(false);
+        log(`CONNECT_ERROR ${error && error.message ? error.message : error}`);
+      });
+
+      socket.on('disconnect', (reason) => {
+        setConnectedUi(false);
+        log(`DISCONNECT reason=${reason}`);
+      });
+
+      socket.on('response', (data) => log(`EVENT response: ${JSON.stringify(data)}`));
+      socket.on('fromServer', (data) => log(`EVENT fromServer: ${JSON.stringify(data)}`));
+      socket.on('error', (error) => log(`EVENT error: ${JSON.stringify(error)}`));
+      socket.on('ping', () => log('PING'));
+      socket.on('pong', (latency) => log(`PONG latency=${latency}`));
+    });
+
+    disconnectBtn.addEventListener('click', () => {
+      if (socket) {
+        socket.disconnect();
+      }
+    });
+
+    sendMessageBtn.addEventListener('click', () => {
+      if (!socket) return;
+      const payload = messageEl.value;
+      socket.emit('message', payload);
+      log(`SENT event=message payload=${JSON.stringify(payload)}`);
+    });
+
+    sendMsgBtn.addEventListener('click', () => {
+      if (!socket) return;
+      const payload = messageEl.value;
+      socket.emit('msg', payload);
+      log(`SENT event=msg payload=${JSON.stringify(payload)}`);
+    });
+
+    setConnectedUi(false);
+  </script>
+</body>
+</html>
+

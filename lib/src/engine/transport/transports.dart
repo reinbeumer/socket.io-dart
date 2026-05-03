@@ -1,49 +1,52 @@
-/// transports.dart
-///
-/// Purpose:
-///
-/// Description:
-///
-/// History:
-///    17/02/2017, Created by jumperchen
-///
-/// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
+// transports.dart
+//
+// Purpose:
+//
+// Description:
+//
+// History:
+//    17/02/2017, Created by jumperchen
+//
+// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
 import 'package:logging/logging.dart';
-import 'package:socket_io/src/engine/connect.dart';
-import 'package:socket_io_common/src/engine/parser/parser.dart';
-import 'package:socket_io/src/engine/transport/jsonp_transport.dart';
-import 'package:socket_io/src/engine/transport/websocket_transport.dart';
-import 'package:socket_io/src/engine/transport/xhr_transport.dart';
-import 'package:socket_io/src/util/event_emitter.dart';
+import 'package:socket_io_common/socket_io_common.dart';
+
+import '../../models/callbacks_models.dart' show VoidCallback;
+import '../../models/transport_error_models.dart';
+import '../../util/event_emitter.dart';
+import '../connect.dart';
+import 'jsonp_transport.dart';
+import 'websocket_transport.dart';
+import 'xhr_transport.dart';
 
 class Transports {
-  static List<String> upgradesTo(String from) {
+  static List<String> upgradesTo(final String from) {
     if ('polling' == from) {
-      return ['websocket'];
+      return <String>['websocket'];
     }
-    return [];
+    return <String>[];
   }
 
-  static Transport newInstance(String name, SocketConnect connect) {
+  static Transport newInstance(final String name, final SocketConnect connect) {
     if ('websocket' == name) {
       return WebSocketTransport(connect);
     } else if ('polling' == name) {
-      if (connect.request.uri.queryParameters.containsKey('j')) {
+      final Map<String, dynamic>? options = connect.dataset['options'] as Map<String, dynamic>?;
+      if (options != null && options.containsKey('jsonp') && options['jsonp'] == true) {
         return JSONPTransport(connect);
       } else {
         return XHRTransport(connect);
       }
-    } else {
-      throw UnsupportedError('Unknown transport $name');
     }
+    throw UnimplementedError('Transport $name is not supported');
   }
 }
 
 abstract class Transport extends EventEmitter {
   static final Logger _logger = Logger('socket_io:transport.Transport');
   double? maxHttpBufferSize;
-  Map? httpCompression;
-  Map? perMessageDeflate;
+  Map<String, dynamic>? httpCompression;
+  Map<String, dynamic>? perMessageDeflate;
   bool? supportsBinary;
   String? sid;
   String? name;
@@ -53,12 +56,11 @@ abstract class Transport extends EventEmitter {
   SocketConnect? connect;
   MessageHandler? messageHandler;
 
-  Transport(connect) {
-    var options = connect.dataset['options'];
+  Transport(final SocketConnect connect) {
+    final Map<String, dynamic>? options = connect.dataset['options'] as Map<String, dynamic>?;
     if (options != null) {
-      messageHandler = options.containsKey('messageHandlerFactory')
-          ? options['messageHandlerFactory'](this, connect)
-          : null;
+      messageHandler =
+          options.containsKey('messageHandlerFactory') ? options['messageHandlerFactory'](this, connect) : null;
     }
   }
 
@@ -66,36 +68,43 @@ abstract class Transport extends EventEmitter {
     discarded = true;
   }
 
-  void onRequest(SocketConnect connect) {
+  void onRequest(final SocketConnect connect) {
     this.connect = connect;
   }
 
-  void close([dynamic Function()? closeFn]) {
+  void close([final VoidCallback? closeFn]) {
     if ('closed' == readyState || 'closing' == readyState) return;
     readyState = 'closing';
     doClose(closeFn);
   }
 
-  void doClose([dynamic Function()? callback]);
+  void doClose([final VoidCallback? callback]);
 
-  void onError(msg, [desc]) {
+  void onError(final Object? msg, [final Object? desc]) {
     writable = false;
     if (hasListeners('error')) {
-      emit('error', {'msg': msg, 'desc': desc, 'type': 'TransportError'});
+      final TransportError error = TransportError(
+        msg: msg?.toString(),
+        desc: desc?.toString(),
+      );
+      // Emit the typed error first
+      emit('error', error);
+      // And emit a map for backward compatibility with existing listeners
+      emit('error', error.toMap());
     } else {
       _logger.fine('ignored transport error $msg ($desc)');
     }
   }
 
-  void onPacket(Map packet) {
+  void onPacket(final Map<String, dynamic> packet) {
     emit('packet', packet);
   }
 
-  void onData(data) {
+  void onData(final dynamic data) {
     if (messageHandler != null) {
       messageHandler!.handle(this, data);
     } else {
-      onPacket(PacketParser.decodePacket(data, utf8decode: true));
+      onPacket(PacketParser.decodePacket(data, 'utf8')! as Map<String, dynamic>);
     }
   }
 
@@ -104,12 +113,12 @@ abstract class Transport extends EventEmitter {
     emit('close');
   }
 
-  void send(List<Map> data);
+  void send(final List<Map<String, dynamic>> data);
 
   bool get supportsFraming;
   bool get handlesUpgrades;
 }
 
 abstract class MessageHandler {
-  void handle(Transport transport, /*String|List<int>*/ message);
+  void handle(final Transport transport, /*String|List<int>*/ final dynamic message);
 }

@@ -1,25 +1,25 @@
-/// connect.dart
-///
-/// Purpose:
-///
-/// Description:
-///
-/// History:
-///    06/03/2017, Created by jumperchen
-///
-/// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
-import 'package:stream/stream.dart';
+// connect.dart
+//
+// Purpose:
+//
+// Description:
+//
+// History:
+//    06/03/2017, Created by jumperchen
+//
+// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
 import 'dart:async';
 import 'dart:io';
 
+import 'package:stream/stream.dart';
+
 class SocketConnect extends HttpConnectWrapper {
   WebSocket? _socket;
-  Completer? _done;
+  Completer<String>? _done;
   bool? _completed;
-  SocketConnect(HttpConnect origin) : super(origin);
+  SocketConnect(super.origin);
 
-  SocketConnect.fromWebSocket(HttpConnect origin, WebSocket socket)
-      : super(origin) {
+  SocketConnect.fromWebSocket(super.origin, final WebSocket socket) {
     _socket = socket;
   }
 
@@ -27,24 +27,24 @@ class SocketConnect extends HttpConnectWrapper {
 
   WebSocket? get websocket => _socket;
 
-  Future get done {
+  Future<String> get done {
     if (_completed == true) {
-      return Future.value('done');
+      return Future<String>.value('done');
     }
     if (_socket != null) {
-      return _socket!.done;
+      return _socket!.done.then((final dynamic _) => 'done');
     } else {
-      _done = Completer();
+      _done = Completer<String>();
       return _done!.future;
     }
   }
 
   /// Closes the current connection.
-  void close() {
+  Future<void> close() async {
     if (_done != null) {
       _done!.complete('done');
     } else if (_socket != null) {
-      _socket!.close();
+      await _socket!.close();
     } else {
       _completed = true;
     }

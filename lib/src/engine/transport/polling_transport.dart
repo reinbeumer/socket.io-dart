@@ -1,20 +1,25 @@
-/// polling_transport.dart
-///
-/// Purpose:
-///
-/// Description:
-///
-/// History:
-///    22/02/2017, Created by jumperchen
-///
-/// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
+// polling_transport.dart
+//
+// Purpose:
+//
+// Description:
+//
+// History:
+//    22/02/2017, Created by jumperchen
+//
+// Copyright (C) 2017 Potix Corporation. All Rights Reserved.
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+
 import 'package:logging/logging.dart';
-import 'package:socket_io/src/engine/connect.dart';
-import 'package:socket_io_common/src/engine/parser/parser.dart';
-import 'package:socket_io/src/engine/transport/transports.dart';
+import 'package:socket_io_common/socket_io_common.dart';
+
+import '../../models/callbacks_models.dart' show VoidCallback;
+import '../../types/common_types.dart' show Headers;
+import '../connect.dart';
+import 'transports.dart';
 
 class PollingTransport extends Transport {
   @override
@@ -25,320 +30,362 @@ class PollingTransport extends Transport {
 
   static final Logger _logger = Logger('socket_io:transport.PollingTransport');
   int closeTimeout = 30 * 1000;
-  Function? shouldClose;
+  VoidCallback? shouldClose;
   SocketConnect? dataReq;
-  PollingTransport(connect) : super(connect) {
+
+  final Map<SocketConnect, VoidCallback> _reqCleanups = <SocketConnect, VoidCallback>{};
+  final Map<SocketConnect, VoidCallback> _reqCloses = <SocketConnect, VoidCallback>{};
+
+  PollingTransport(super.connect) {
     maxHttpBufferSize = null;
     httpCompression = null;
     name = 'polling';
   }
 
   @override
-  void onRequest(SocketConnect connect) {
-    var res = connect.response;
+  Future<void> onRequest(final SocketConnect connect) async {
+    final HttpResponse res = connect.response;
 
     if ('GET' == connect.request.method) {
-      onPollRequest(connect);
+      await onPollRequest(connect);
     } else if ('POST' == connect.request.method) {
-      onDataRequest(connect);
+      await onDataRequest(connect);
+    } else if ('OPTIONS' == connect.request.method) {
+      await onOptionsRequest(connect);
     } else {
       res.statusCode = 500;
-      res.close();
+      await res.close();
     }
   }
 
-  final Map<SocketConnect, Function> _reqCleanups = {};
-  final Map<SocketConnect, Function> _reqCloses = {};
+  /// Handle CORS preflight requests
+  Future<void> onOptionsRequest(final SocketConnect connect) async {
+    final HttpResponse res = connect.response;
+    final Headers headers = <String, String>{};
+
+    this.headers(connect, headers).forEach((final String key, final Object value) {
+      res.headers.set(key, value);
+    });
+
+    res
+      ..statusCode = 200
+      ..write('');
+    await res.close();
+    await connect.close();
+  }
 
   /// The client sends a request awaiting for us to send data.
-  ///
-  /// @api private
-  void onPollRequest(SocketConnect connect) {
+  Future<void> onPollRequest(final SocketConnect connect) async {
     if (this.connect != null) {
       _logger.fine('request overlap');
-      // assert: this.res, '.req and .res should be (un)set together'
       onError('overlap from client');
-      this.connect!.response.statusCode = 500;
-      this.connect!.close();
+      connect.response.statusCode = 500;
+      await connect.close();
       return;
     }
 
     _logger.fine('setting request');
-
     this.connect = connect;
 
-    var onClose = () {
-      onError('poll connection closed prematurely');
-    };
-
-    var cleanup = () {
-      _reqCloses.remove(connect);
+    void cleanup() {
       this.connect = null;
-    };
+    }
+
+    void onClose() {
+      cleanup();
+    }
 
     _reqCleanups[connect] = cleanup;
     _reqCloses[connect] = onClose;
 
     writable = true;
-    emit('drain');
+    emit('drain', null);
 
     // if we're still writable but had a pending close, trigger an empty send
     if (writable == true && shouldClose != null) {
       _logger.fine('triggering empty send to append close packet');
-      send([
-        {'type': 'noop'}
+      send(<Map<String, dynamic>>[
+        <String, String>{'type': 'noop'}
       ]);
     }
   }
 
   /// The client sends a request with data.
-  ///
-  /// @api private
-  void onDataRequest(SocketConnect connect) {
+  Future<void> onDataRequest(final SocketConnect connect) async {
     if (dataReq != null) {
-      // assert: this.dataRes, '.dataReq and .dataRes should be (un)set together'
       onError('data request overlap from client');
       connect.response.statusCode = 500;
-      connect.close();
+      await connect.close();
       return;
     }
 
-    var isBinary = 'application/octet-stream' ==
-        connect.request.headers.value('content-type');
+    final bool isBinary = 'application/octet-stream' == connect.request.headers.value('content-type');
 
     dataReq = connect;
+    dynamic chunks = isBinary ? <int>[] : '';
+    final PollingTransport self = this;
+    int contentLength = 0;
 
-    dynamic chunks = isBinary ? [0] : '';
-    var self = this;
-    StreamSubscription? subscription;
-    var cleanup = () {
-      chunks = isBinary ? [0] : '';
-      if (subscription != null) {
-        subscription.cancel();
-      }
+    void cleanup() {
+      chunks = isBinary ? <int>[] : '';
       self.dataReq = null;
-    };
+    }
 
-    var onData = (List<int> data) {
-      var contentLength;
-      if (data is String) {
-        chunks += data;
+    Future<void> onData(final Uint8List data) async {
+      if (chunks is String) {
+        chunks += String.fromCharCodes(data);
         contentLength = utf8.encode(chunks).length;
       } else {
-        if (chunks is String) {
-          chunks += String.fromCharCodes(data);
-        } else {
-          chunks.addAll(String.fromCharCodes(data)
-              .split(',')
-              .map((s) => int.parse(s))
-              .toList());
-        }
+        chunks.addAll(data);
         contentLength = chunks.length;
       }
 
-      if (contentLength > self.maxHttpBufferSize) {
+      if (contentLength > (self.maxHttpBufferSize ?? 1000000)) {
         chunks = '';
-        connect.close();
+        await connect.close();
+        return;
       }
-    };
+    }
 
-    var onEnd = () {
+    Future<void> onEnd() async {
       self.onData(chunks);
-
-      var headers = {'Content-Type': 'text/html', 'Content-Length': 2};
-
-      var res = connect.response;
-
-      res.statusCode = 200;
-
+      final Headers headers = <String, Object>{'Content-Type': 'text/html', 'Content-Length': 2};
+      final HttpResponse res = connect.response;
       res.headers.clear();
-      // text/html is required instead of text/plain to avoid an
-      // unwanted download dialog on certain user-agents (GH-43)
-      self.headers(connect, headers).forEach((key, value) {
+
+      self.headers(connect, headers).forEach((final String key, final Object value) {
         res.headers.set(key, value);
       });
-      res.write('ok');
-      connect.close();
+      res
+        ..statusCode = 200
+        ..write('ok');
+      await connect.close();
       cleanup();
-    };
-
-    subscription = connect.request.listen(onData, onDone: onEnd);
-    if (!isBinary) {
-      connect.response.headers.contentType =
-          ContentType.text; // for encoding utf-8
     }
+
+    connect.request.listen(onData, onDone: onEnd);
+
+    if (!isBinary) {
+      connect.response.headers.contentType = ContentType('text', 'plain', charset: 'utf-8');
+    }
+
+    _reqCleanups[connect] = cleanup;
+    _reqCloses[connect] = cleanup;
   }
 
   /// Processes the incoming data payload.
-  ///
-  /// @param {String} encoded payload
-  /// @api private
   @override
-  void onData(data) {
+  void onData(final dynamic data) {
     _logger.fine('received "$data"');
     if (messageHandler != null) {
       messageHandler!.handle(this, data);
     } else {
-      var self = this;
-      var callback = (packet, [foo, bar]) {
-        if ('close' == packet['type']) {
-          _logger.fine('got xhr close packet');
-          self.onClose();
-          return false;
+      if (data is String && data.isNotEmpty) {
+        final List<String> packets = _extractPacketStrings(data);
+
+        for (final String packetData in packets) {
+          if (packetData.isEmpty) continue;
+
+          try {
+            final Map<String, dynamic>? packet = PacketParser.decodePacket(packetData, 'utf8') as Map<String, dynamic>?;
+            if (_handleDecodedPacket(packet)) {
+              return;
+            }
+          } catch (e, st) {
+            _logger.warning('Error decoding packet "$packetData": $e\n$st');
+          }
         }
-
-        self.onPacket(packet);
-        return true;
-      };
-
-      PacketParser.decodePayload(data, callback: callback);
+      } else if (data is List<int>) {
+        try {
+          final Map<String, dynamic>? packet = PacketParser.decodePacket(data, null) as Map<String, dynamic>?;
+          if (_handleDecodedPacket(packet)) {
+            return;
+          }
+        } catch (e, st) {
+          _logger.warning('Error decoding binary packet: $e\n$st');
+        }
+      }
     }
   }
 
-  /// Overrides onClose.
+  bool _handleDecodedPacket(final Map<String, dynamic>? packet) {
+    if (packet == null) {
+      return false;
+    }
+
+    if ('close' == packet['type']) {
+      _logger.fine('got polling close packet');
+      onClose();
+      return true;
+    }
+
+    onPacket(packet);
+    return false;
+  }
+
+  /// Extracts individual packets from a text polling payload.
   ///
-  /// @api private
+  /// Engine.IO v4 uses the record-separator character for multi-packet payloads.
+  /// Some clients have also been observed to concatenate packets directly,
+  /// so we keep the fallback splitter for compatibility.
+  List<String> _extractPacketStrings(final String payload) {
+    if (payload.contains(SEPARATOR)) {
+      return payload.split(SEPARATOR);
+    }
+
+    return _splitPackets(payload);
+  }
+
+  /// Splits concatenated packets in a fallback polling payload.
+  List<String> _splitPackets(final String payload) {
+    final List<String> packets = <String>[];
+    int start = 0;
+
+    for (int i = 1; i < payload.length; i++) {
+      if (_isDigit(payload[i])) {
+        final String prevChar = payload[i - 1];
+        if (prevChar == ']' || prevChar == '}' || prevChar == '"') {
+          packets.add(payload.substring(start, i));
+          start = i;
+        }
+      }
+    }
+
+    if (start < payload.length) {
+      packets.add(payload.substring(start));
+    }
+
+    return packets;
+  }
+
+  bool _isDigit(final String char) {
+    if (char.isEmpty) return false;
+    final int code = char.codeUnitAt(0);
+    return code >= 48 && code <= 57;
+  }
+
+  /// Overrides onClose.
   @override
   void onClose() {
     if (writable == true) {
       // close pending poll request
-      send([
-        {'type': 'noop'}
+      send(<Map<String, dynamic>>[
+        <String, String>{'type': 'noop'}
       ]);
     }
     super.onClose();
   }
 
   /// Writes a packet payload.
-  ///
-  /// @param {Object} packet
-  /// @api private
   @override
-  void send(List packets) {
+  void send(final List<Map<String, dynamic>> packets) {
     writable = false;
 
     if (shouldClose != null) {
       _logger.fine('appending close packet to payload');
-      packets.add({'type': 'close'});
+      packets.add(<String, String>{'type': 'close'});
       shouldClose!();
       shouldClose = null;
     }
 
-    var self = this;
-    PacketParser.encodePayload(packets, supportsBinary: supportsBinary == true,
-        callback: (data) {
-      var compress = packets.any((packet) {
-        var opt = packet['options'];
+    PacketParser.encodePayload(packets, callback: (final dynamic data) async {
+      final bool compress = packets.any((final Map<String, dynamic> packet) {
+        final Map<String, bool>? opt = packet['options'] as Map<String, bool>?;
         return opt != null && opt['compress'] == true;
       });
-      self.write(data, {'compress': compress});
+      await write(data, <String, bool>{'compress': compress});
     });
   }
 
   /// Writes data as response to poll request.
-  ///
-  /// @param {String} data
-  /// @param {Object} options
-  /// @api private
-  void write(data, [options]) {
+  Future<void> write(final dynamic data, final Map<String, bool> options) async {
     _logger.fine('writing "$data"');
-    doWrite(data, options, () {
-      var fn = _reqCleanups.remove(connect);
+    await doWrite(data, options, () {
+      final Function? fn = _reqCleanups.remove(connect);
       if (fn != null) fn();
     });
   }
 
   /// Performs the write.
-  ///
-  /// @api private
-  void doWrite(data, options, [callback]) {
-    var self = this;
+  Future<void> doWrite(final dynamic data, final Map<String, bool>? options, [final Function? callback]) async {
+    final PollingTransport self = this;
 
-    // explicit UTF-8 is required for pages not served under utf
-    var isString = data is String;
-    var contentType =
-        isString ? 'text/plain; charset=UTF-8' : 'application/octet-stream';
+    final bool isString = data is String;
+    final String contentType = isString ? 'text/plain; charset=UTF-8' : 'application/octet-stream';
 
-    final headers = <String, dynamic>{'Content-Type': contentType};
+    final Headers headers = <String, Object>{'Content-Type': contentType};
 
-    var respond = (data) {
-      headers[HttpHeaders.contentLengthHeader] =
-          data is String ? utf8.encode(data).length : data.length;
-      var res = self.connect!.response;
+    Future<void> respond(final dynamic data) async {
+      headers[HttpHeaders.contentLengthHeader] = data is String ? utf8.encode(data).length : data.length;
 
-      // If the status code is 101 (aka upgrade), then
-      // we assume the WebSocket transport has already
-      // sent the response and closed the socket
-      if (res.statusCode != 101) {
-        res.statusCode = 200;
+      if (self.connect != null) {
+        final HttpResponse res = self.connect!.response;
 
-        res.headers.clear(); // remove all default headers.
-        this.headers(connect!, headers).forEach((k, v) {
-          res.headers.set(k, v);
-        });
-        try {
-          if (data is String) {
-            res.write(data);
-            connect!.close();
-          } else {
-            if (headers.containsKey(HttpHeaders.contentEncodingHeader)) {
-              res.add(data);
+        if (res.statusCode != 101) {
+          res.statusCode = 200;
+          res.headers.clear();
+
+          self.headers(connect!, headers).forEach((final String k, final Object v) {
+            res.headers.set(k, v);
+          });
+
+          try {
+            if (data is String) {
+              res.write(data);
             } else {
-              res.write(String.fromCharCodes(data));
+              if (headers.containsKey(HttpHeaders.contentEncodingHeader)) {
+                res.add(data);
+              } else {
+                res.write(String.fromCharCodes(data));
+              }
             }
-            connect!.close();
+            await connect!.close();
+          } catch (e) {
+            final Function? fn = _reqCloses.remove(connect);
+            if (fn != null) fn();
+            rethrow;
           }
-        } catch (e) {
-          var fn = _reqCloses.remove(connect);
-          if (fn != null) fn();
-          rethrow;
         }
       }
-      callback();
-    };
 
-    if (httpCompression == null || options['compress'] != true) {
-      respond(data);
+      if (callback != null) callback();
+    }
+
+    if (httpCompression == null || options?['compress'] != true) {
+      await respond(data);
       return;
     }
 
-    var len = isString ? utf8.encode(data).length : data.length;
-    if (len < httpCompression?['threshold']) {
-      respond(data);
+    final int len = isString ? utf8.encode(data).length : data.length;
+    if (len < (httpCompression?['threshold'] ?? 1024)) {
+      await respond(data);
       return;
     }
 
-    var encodings =
-        connect!.request.headers.value(HttpHeaders.acceptEncodingHeader);
-    var hasGzip = encodings!.contains('gzip');
-    if (!hasGzip && !encodings.contains('deflate')) {
-      respond(data);
+    final String? encodings = connect!.request.headers.value(HttpHeaders.acceptEncodingHeader);
+    final bool hasGzip = encodings?.contains('gzip') ?? false;
+    if (!hasGzip && !(encodings?.contains('deflate') ?? false)) {
+      await respond(data);
       return;
     }
-    var encoding = hasGzip ? 'gzip' : 'deflate';
-//    this.compress(data, encoding, (err, data) {
-//      if (err != null) {
-//        self.req.response..statusCode = 500..close();
-//        callback(err);
-//        return;
-//      }
 
+    final String encoding = hasGzip ? 'gzip' : 'deflate';
     headers[HttpHeaders.contentEncodingHeader] = encoding;
-    respond(hasGzip
-        ? gzip.encode(utf8.encode(
-            data is List ? String.fromCharCodes(data as List<int>) : data))
-        : data);
-//    });
+
+    if (hasGzip) {
+      final String dataString = data is List ? String.fromCharCodes(data as List<int>) : data;
+      await respond(gzip.encode(utf8.encode(dataString)));
+    } else {
+      await respond(data);
+    }
   }
 
-  /// Closes the transport.
-  ///
-  /// @api private
+  /// Overrides `doClose`.
   @override
-  void doClose([dynamic Function()? fn]) {
-    _logger.fine('closing');
+  void doClose([final VoidCallback? fn]) {
+    _logger.fine('polling transport closing');
 
-    var self = this;
+    final PollingTransport self = this;
     Timer? closeTimeoutTimer;
 
     if (dataReq != null) {
@@ -346,43 +393,57 @@ class PollingTransport extends Transport {
       dataReq = null;
     }
 
-    var onClose = () {
+    void onCloseCallback() {
       if (closeTimeoutTimer != null) closeTimeoutTimer.cancel();
       if (fn != null) fn();
       self.onClose();
-    };
+    }
+
     if (writable == true) {
       _logger.fine('transport writable - closing right away');
-      send([
-        {'type': 'close'}
+      send(<Map<String, dynamic>>[
+        <String, String>{'type': 'close'}
       ]);
-      onClose();
-    } else if (discarded) {
+      onCloseCallback();
+    } else if (discarded == true) {
       _logger.fine('transport discarded - closing right away');
-      onClose();
+      onCloseCallback();
     } else {
       _logger.fine('transport not writable - buffering orderly close');
-      shouldClose = onClose;
-      closeTimeoutTimer = Timer(Duration(milliseconds: closeTimeout), onClose);
+      shouldClose = onCloseCallback;
+      closeTimeoutTimer = Timer(Duration(milliseconds: closeTimeout), onCloseCallback);
     }
   }
 
   /// Returns headers for a response.
-  ///
-  /// @param {http.IncomingMessage} request
-  /// @param {Object} extra headers
-  /// @api private
-  Map headers(SocketConnect connect, [Map? headers]) {
-    headers = headers ?? {};
+  Headers headers(final SocketConnect connect, [Headers? headers]) {
+    final Headers responseHeaders = headers ?? <String, Object>{};
 
-    // prevent XSS warnings on IE
-    // https://github.com/LearnBoost/socket.io/pull/1333
-    var ua = connect.request.headers.value('user-agent');
-    if (ua != null && (ua.contains(';MSIE') || ua.contains('Trident/'))) {
-      headers['X-XSS-Protection'] = '0';
+    // Add CORS headers for cross-origin requests - CRITICAL for fallback
+    final String? origin = connect.request.headers.value('origin');
+    if (origin != null) {
+      responseHeaders['Access-Control-Allow-Origin'] = origin;
+      responseHeaders['Access-Control-Allow-Credentials'] = 'true';
+    } else {
+      responseHeaders['Access-Control-Allow-Origin'] = '*';
     }
 
-    emit('headers', headers);
-    return headers;
+    responseHeaders['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS';
+    responseHeaders['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-Requested-With';
+    responseHeaders['Access-Control-Max-Age'] = '86400';
+
+    // prevent XSS warnings on IE
+    final String? ua = connect.request.headers.value('user-agent');
+    if (ua != null && (ua.contains(';MSIE') || ua.contains('Trident/'))) {
+      responseHeaders['X-XSS-Protection'] = '0';
+    }
+
+    // Add cache control headers to prevent caching - CRITICAL for real-time
+    responseHeaders['Cache-Control'] = 'no-cache, no-store, must-revalidate';
+    responseHeaders['Pragma'] = 'no-cache';
+    responseHeaders['Expires'] = '0';
+
+    emit('headers', responseHeaders);
+    return responseHeaders;
   }
 }
