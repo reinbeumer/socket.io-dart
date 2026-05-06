@@ -417,7 +417,6 @@ For detailed API documentation, see:
 - [TYPE_SAFE_EXAMPLES.md](doc/TYPE_SAFE_EXAMPLES.md) - Comprehensive examples of the typed API
 - [TYPE_SAFETY_MIGRATION_GUIDE.md](doc/TYPE_SAFETY_MIGRATION_GUIDE.md) - Migration guide from legacy to typed API
 - [QUICK_REFERENCE.md](doc/QUICK_REFERENCE.md) - Quick reference guide
-- [UPGRADE_TO_V3.md](doc/archive/UPGRADE_TO_V3.md) - Upgrade guide for breaking changes
 
 ## Architecture
 
